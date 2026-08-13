@@ -125,6 +125,7 @@ pub(crate) struct TextArea {
     kill_buffer: String,
     kill_buffer_kind: KillBufferKind,
     vim_enabled: bool,
+    vim_insert_mode_default: bool,
     vim_mode: VimMode,
     vim_pending: VimPending,
     editor_keymap: EditorKeymap,
@@ -166,6 +167,7 @@ impl TextArea {
             kill_buffer: String::new(),
             kill_buffer_kind: KillBufferKind::Characterwise,
             vim_enabled: false,
+            vim_insert_mode_default: false,
             vim_mode: VimMode::Insert,
             vim_pending: VimPending::None,
             editor_keymap: defaults.editor,
@@ -240,18 +242,23 @@ impl TextArea {
 
     /// Enable or disable modal Vim editing for the textarea.
     ///
-    /// Enabling always enters normal mode and disabling always returns to
-    /// insert semantics. Pending operators are cleared in both directions so a
-    /// toggle cannot leave the next keypress interpreted as the second half of
-    /// an old `d` or `y` command.
+    /// Enabling enters the configured default Vim mode and disabling returns
+    /// to insert semantics. Pending operators are cleared in both directions
+    /// so a toggle cannot leave the next keypress interpreted as the second
+    /// half of an old `d` or `y` command.
     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
         self.vim_enabled = enabled;
         self.vim_pending = VimPending::None;
-        self.vim_mode = if enabled {
-            VimMode::Normal
+        if enabled {
+            self.enter_vim_default_mode();
         } else {
-            VimMode::Insert
-        };
+            self.vim_mode = VimMode::Insert;
+        }
+    }
+
+    /// Configure whether fresh Vim-mode messages begin in insert mode.
+    pub(crate) fn set_vim_insert_mode_default(&mut self, insert_mode_default: bool) {
+        self.vim_insert_mode_default = insert_mode_default;
     }
 
     /// Return whether modal Vim editing is currently enabled.
@@ -318,6 +325,19 @@ impl TextArea {
     pub(crate) fn enter_vim_normal_mode(&mut self) {
         if self.vim_enabled {
             self.vim_mode = VimMode::Normal;
+            self.vim_pending = VimPending::None;
+            self.preferred_col = None;
+        }
+    }
+
+    /// Enter the configured mode for a fresh Vim-enabled composer message.
+    pub(crate) fn enter_vim_default_mode(&mut self) {
+        if self.vim_enabled {
+            self.vim_mode = if self.vim_insert_mode_default {
+                VimMode::Insert
+            } else {
+                VimMode::Normal
+            };
             self.vim_pending = VimPending::None;
             self.preferred_col = None;
         }

@@ -1298,6 +1298,12 @@ impl ChatComposer {
         self.footer.mode = reset_mode_after_activity(self.footer.mode);
     }
 
+    pub(crate) fn set_vim_insert_mode_default(&mut self, insert_mode_default: bool) {
+        self.draft
+            .textarea
+            .set_vim_insert_mode_default(insert_mode_default);
+    }
+
     /// Toggle Vim editing and return the new enabled state.
     ///
     /// This is the app-level command target for the configurable Vim toggle
@@ -3006,7 +3012,7 @@ impl ChatComposer {
                 | InputResult::ServiceTierCommand(_)
                 | InputResult::CommandWithArgs(_, _, _)
         ) {
-            self.draft.textarea.enter_vim_normal_mode();
+            self.draft.textarea.enter_vim_default_mode();
         }
     }
 
@@ -5286,6 +5292,15 @@ mod tests {
         );
 
         snapshot_composer_state(
+            "footer_mode_vim_insert_default",
+            /*enhanced_keys_supported*/ true,
+            |composer| {
+                composer.set_vim_insert_mode_default(/*insert_mode_default*/ true);
+                composer.set_vim_enabled(/*enabled*/ true);
+            },
+        );
+
+        snapshot_composer_state(
             "footer_mode_shell_command_absorbs_bang",
             /*enhanced_keys_supported*/ true,
             |composer| {
@@ -6256,6 +6271,37 @@ mod tests {
             InputResult::Submitted { text, .. } => assert_eq!(text, "h"),
             _ => panic!("expected Submitted"),
         }
+    }
+
+    #[test]
+    fn vim_insert_mode_default_resets_to_insert_after_submission() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ true,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ true,
+        );
+        composer.set_vim_insert_mode_default(/*insert_mode_default*/ true);
+        composer.set_vim_enabled(/*enabled*/ true);
+        composer.set_text_content("first".to_string(), Vec::new(), Vec::new());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(result, InputResult::Submitted { .. }));
+        assert_eq!(
+            composer.vim_mode_indicator_span(),
+            Some("Vim: Insert".green())
+        );
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(composer.current_text(), "x");
     }
 
     #[test]

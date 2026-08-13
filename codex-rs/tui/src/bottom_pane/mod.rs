@@ -499,6 +499,11 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_vim_insert_mode_default(&mut self, insert_mode_default: bool) {
+        self.composer
+            .set_vim_insert_mode_default(insert_mode_default);
+    }
+
     pub(crate) fn toggle_vim_enabled(&mut self) -> bool {
         let enabled = self.composer.toggle_vim_enabled();
         self.request_redraw();

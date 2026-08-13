@@ -64,8 +64,10 @@ use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverableType;
 use codex_config::types::Tui;
 use codex_config::types::TuiKeymap;
+use codex_config::types::TuiModes;
 use codex_config::types::TuiNotificationSettings;
 use codex_config::types::TuiPetAnchor;
+use codex_config::types::TuiVimMode;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_config::types::WindowsToml;
 use codex_exec_server::LOCAL_FS;
@@ -1097,6 +1099,7 @@ fn config_toml_deserializes_model_availability_nux() {
             animations: true,
             show_tooltips: true,
             vim_mode_default: false,
+            modes: TuiModes::default(),
             raw_output_mode: false,
             alternate_screen: AltScreenMode::default(),
             status_line: None,
@@ -1117,6 +1120,33 @@ fn config_toml_deserializes_model_availability_nux() {
             terminal_resize_reflow_max_rows: None,
         }
     );
+}
+
+#[test]
+fn tui_vim_insert_mode_default_round_trips() {
+    let toml = r#"
+[tui.modes.vim]
+insert_mode_default = true
+"#;
+    let parsed: ConfigToml = toml::from_str(toml).expect("nested Vim config should deserialize");
+
+    assert_eq!(
+        parsed
+            .tui
+            .as_ref()
+            .expect("config should include tui section")
+            .modes,
+        TuiModes {
+            vim: TuiVimMode {
+                insert_mode_default: true,
+            },
+        }
+    );
+
+    let serialized = toml::to_string(&parsed).expect("nested Vim config should serialize");
+    let reparsed: ConfigToml =
+        toml::from_str(&serialized).expect("serialized nested Vim config should deserialize");
+    assert_eq!(reparsed, parsed);
 }
 
 #[test]
@@ -3985,6 +4015,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             animations: true,
             show_tooltips: true,
             vim_mode_default: false,
+            modes: TuiModes::default(),
             raw_output_mode: false,
             alternate_screen: AltScreenMode::Auto,
             status_line: None,

@@ -3477,6 +3477,19 @@
           "default": {},
           "description": "Startup tooltip availability NUX state persisted by the TUI."
         },
+        "modes": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiModes"
+            }
+          ],
+          "default": {
+            "vim": {
+              "insert_mode_default": false
+            }
+          },
+          "description": "Behavior settings for optional TUI editing modes."
+        },
         "notification_condition": {
           "allOf": [
             {
@@ -3581,7 +3594,7 @@
         },
         "vim_mode_default": {
           "default": false,
-          "description": "Start the composer in Vim mode (`Normal`) by default. Defaults to `false`.",
+          "description": "Enable Vim editing in the composer by default. Defaults to `false`.",
           "type": "boolean"
         }
       },
@@ -4279,6 +4292,24 @@
       },
       "type": "object"
     },
+    "TuiModes": {
+      "additionalProperties": false,
+      "description": "Settings that control the behavior of optional TUI editing modes.",
+      "properties": {
+        "vim": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiVimMode"
+            }
+          ],
+          "default": {
+            "insert_mode_default": false
+          },
+          "description": "Vim-mode behavior settings."
+        }
+      },
+      "type": "object"
+    },
     "TuiPagerKeymap": {
       "additionalProperties": false,
       "description": "Pager context keybindings for transcript and static overlays.",
@@ -4383,6 +4414,18 @@
           "type": "string"
         }
       ]
+    },
+    "TuiVimMode": {
+      "additionalProperties": false,
+      "description": "Behavior settings applied while Vim editing is enabled.",
+      "properties": {
+        "insert_mode_default": {
+          "default": false,
+          "description": "Start each new composer message in insert mode instead of normal mode. Defaults to `false`.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "TuiVimNormalKeymap": {
       "additionalProperties": false,

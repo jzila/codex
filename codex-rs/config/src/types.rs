@@ -683,6 +683,27 @@ pub struct ModelAvailabilityNuxConfig {
     pub shown_count: HashMap<String, u32>,
 }
 
+/// Settings that control the behavior of optional TUI editing modes.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct TuiModes {
+    /// Vim-mode behavior settings.
+    #[serde(default)]
+    pub vim: TuiVimMode,
+}
+
+/// Behavior settings applied while Vim editing is enabled.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct TuiVimMode {
+    /// Start each new composer message in insert mode instead of normal mode.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub insert_mode_default: bool,
+}
+
 /// Fallback resize-reflow row cap when Codex cannot identify a terminal-specific scrollback size.
 pub const DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS: usize = 1_000;
 
@@ -703,10 +724,14 @@ pub struct Tui {
     #[serde(default = "default_true")]
     pub show_tooltips: bool,
 
-    /// Start the composer in Vim mode (`Normal`) by default.
+    /// Enable Vim editing in the composer by default.
     /// Defaults to `false`.
     #[serde(default)]
     pub vim_mode_default: bool,
+
+    /// Behavior settings for optional TUI editing modes.
+    #[serde(default)]
+    pub modes: TuiModes,
 
     /// Start the TUI in raw scrollback mode for copy-friendly transcript output.
     /// Defaults to `false`.

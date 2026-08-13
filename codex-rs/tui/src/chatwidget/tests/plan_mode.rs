@@ -1551,6 +1551,24 @@ async fn vim_mode_default_enabled_starts_composer_in_normal_mode() {
     assert_eq!(chat.bottom_pane.composer_text(), "");
 }
 
+#[tokio::test]
+async fn vim_insert_mode_default_starts_composer_in_insert_mode() {
+    let mut chat = make_startup_chat_with_cli_overrides(vec![
+        ("tui.vim_mode_default".to_string(), TomlValue::Boolean(true)),
+        (
+            "tui.modes.vim.insert_mode_default".to_string(),
+            TomlValue::Boolean(true),
+        ),
+        ("disable_paste_burst".to_string(), TomlValue::Boolean(true)),
+    ])
+    .await;
+
+    assert!(chat.config.tui_vim_insert_mode_default);
+    assert!(chat.bottom_pane.composer_is_vim_enabled());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(chat.bottom_pane.composer_text(), "x");
+}
+
 async fn make_startup_chat_with_cli_overrides(
     cli_overrides: Vec<(String, TomlValue)>,
 ) -> ChatWidget {
