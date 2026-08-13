@@ -282,6 +282,7 @@ define_runtime_action_bindings! {
     "vim_operator" => VimOperator, vim_operator, vim_operator [
         delete_line,
         yank_line,
+        change_line,
         motion_left,
         motion_right,
         motion_up,

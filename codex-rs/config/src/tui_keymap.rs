@@ -243,7 +243,7 @@ pub struct TuiVimNormalKeymap {
     pub start_delete_operator: Option<KeybindingsSpec>,
     /// Begin yank operator; next key selects motion (`y`).
     pub start_yank_operator: Option<KeybindingsSpec>,
-    /// Begin change operator; next keys select a text object.
+    /// Begin change operator; next keys select a motion or text object.
     pub start_change_operator: Option<KeybindingsSpec>,
     /// Cancel a pending operator and return to normal mode.
     pub cancel_operator: Option<KeybindingsSpec>,
@@ -251,8 +251,8 @@ pub struct TuiVimNormalKeymap {
 
 /// Vim operator-pending keybindings for modal editing inside text areas.
 ///
-/// This context is active only while waiting for a motion after `d` or `y`.
-/// Repeating the operator key (`dd`, `yy`) targets the entire line. Pressing
+/// This context is active only while waiting for a motion after `d`, `y`, or `c`.
+/// Repeating the operator key (`dd`, `yy`, `cc`) targets the entire line. Pressing
 /// `Esc` cancels the pending operator and returns to normal mode without
 /// modifying text.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
@@ -262,6 +262,8 @@ pub struct TuiVimOperatorKeymap {
     pub delete_line: Option<KeybindingsSpec>,
     /// Repeat yank operator to yank the whole line (`yy`).
     pub yank_line: Option<KeybindingsSpec>,
+    /// Repeat change operator to change the whole line (`cc`).
+    pub change_line: Option<KeybindingsSpec>,
     /// Motion: left (`h`).
     pub motion_left: Option<KeybindingsSpec>,
     /// Motion: right (`l`).

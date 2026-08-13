@@ -50,6 +50,7 @@ use self::vim::VimPending;
 use self::vim::VimTextObjectScope;
 
 const WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
+const MAX_VIM_COUNT: usize = 9_999;
 
 fn is_word_separator(ch: char) -> bool {
     WORD_SEPARATORS.contains(ch)
@@ -127,6 +128,7 @@ pub(crate) struct TextArea {
     vim_enabled: bool,
     vim_mode: VimMode,
     vim_pending: VimPending,
+    vim_count: Option<usize>,
     editor_keymap: EditorKeymap,
     vim_normal_keymap: VimNormalKeymap,
     vim_operator_keymap: VimOperatorKeymap,
@@ -168,6 +170,7 @@ impl TextArea {
             vim_enabled: false,
             vim_mode: VimMode::Insert,
             vim_pending: VimPending::None,
+            vim_count: None,
             editor_keymap: defaults.editor,
             vim_normal_keymap: defaults.vim_normal,
             vim_operator_keymap: defaults.vim_operator,
@@ -236,6 +239,8 @@ impl TextArea {
         self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
         self.wrap_cache.replace(None);
         self.preferred_col = None;
+        self.vim_pending = VimPending::None;
+        self.vim_count = None;
     }
 
     /// Enable or disable modal Vim editing for the textarea.
@@ -247,6 +252,7 @@ impl TextArea {
     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
         self.vim_enabled = enabled;
         self.vim_pending = VimPending::None;
+        self.vim_count = None;
         self.vim_mode = if enabled {
             VimMode::Normal
         } else {
@@ -292,7 +298,7 @@ impl TextArea {
         }
         match self.vim_pending {
             VimPending::None => KeymapContext::VimNormal,
-            VimPending::Operator(_) => KeymapContext::VimOperator,
+            VimPending::Operator { .. } => KeymapContext::VimOperator,
             VimPending::TextObject { .. } => KeymapContext::VimTextObject,
         }
     }
@@ -306,6 +312,7 @@ impl TextArea {
         if self.vim_enabled {
             self.vim_mode = VimMode::Insert;
             self.vim_pending = VimPending::None;
+            self.vim_count = None;
         }
     }
 
@@ -319,6 +326,7 @@ impl TextArea {
         if self.vim_enabled {
             self.vim_mode = VimMode::Normal;
             self.vim_pending = VimPending::None;
+            self.vim_count = None;
             self.preferred_col = None;
         }
     }
@@ -676,19 +684,71 @@ impl TextArea {
         self.input_with_keymap(event, &keymap);
     }
 
+    fn accumulate_vim_count(&mut self, event: KeyEvent) -> bool {
+        let KeyEvent {
+            code: KeyCode::Char(ch),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } = event
+        else {
+            return false;
+        };
+        let Some(digit) = ch.to_digit(10).map(|digit| digit as usize) else {
+            return false;
+        };
+        if digit == 0 && self.vim_count.is_none() {
+            return false;
+        }
+        let count = self.vim_count.unwrap_or_default();
+        self.vim_count = Some(
+            count
+                .saturating_mul(10)
+                .saturating_add(digit)
+                .min(MAX_VIM_COUNT),
+        );
+        true
+    }
+
+    fn take_vim_count(&mut self) -> usize {
+        self.vim_count.take().unwrap_or(1)
+    }
+
     fn handle_vim_normal(&mut self, event: KeyEvent) {
         let pending = std::mem::replace(&mut self.vim_pending, VimPending::None);
         match pending {
-            VimPending::None => {}
-            VimPending::Operator(op) => {
-                self.handle_vim_operator(op, event);
+            VimPending::None => {
+                if self.accumulate_vim_count(event) {
+                    return;
+                }
+            }
+            VimPending::Operator { operator, count } => {
+                if self.accumulate_vim_count(event) {
+                    self.vim_pending = pending;
+                    return;
+                }
+                let count = count
+                    .saturating_mul(self.take_vim_count())
+                    .min(MAX_VIM_COUNT);
+                self.handle_vim_operator(operator, count, event);
                 return;
             }
-            VimPending::TextObject { operator, scope } => {
-                self.handle_vim_text_object(operator, scope, event);
+            VimPending::TextObject {
+                operator,
+                count,
+                scope,
+            } => {
+                if self.accumulate_vim_count(event) {
+                    self.vim_pending = pending;
+                    return;
+                }
+                let count = count
+                    .saturating_mul(self.take_vim_count())
+                    .min(MAX_VIM_COUNT);
+                self.handle_vim_text_object(operator, count, scope, event);
                 return;
             }
         }
+        let count = self.take_vim_count();
 
         if self.vim_normal_keymap.enter_insert.is_pressed(event) {
             self.vim_mode = VimMode::Insert;
@@ -732,31 +792,45 @@ impl TextArea {
             return;
         }
         if self.vim_normal_keymap.move_left.is_pressed(event) {
-            self.move_cursor_left();
+            for _ in 0..count {
+                self.move_cursor_left();
+            }
             return;
         }
         if self.vim_normal_keymap.move_right.is_pressed(event) {
-            self.move_cursor_right();
+            for _ in 0..count {
+                self.move_cursor_right();
+            }
             return;
         }
         if self.vim_normal_keymap.move_down.is_pressed(event) {
-            self.move_cursor_down();
+            for _ in 0..count {
+                self.move_cursor_down();
+            }
             return;
         }
         if self.vim_normal_keymap.move_up.is_pressed(event) {
-            self.move_cursor_up();
+            for _ in 0..count {
+                self.move_cursor_up();
+            }
             return;
         }
         if self.vim_normal_keymap.move_word_forward.is_pressed(event) {
-            self.set_cursor(self.beginning_of_next_word());
+            for _ in 0..count {
+                self.set_cursor(self.beginning_of_next_word());
+            }
             return;
         }
         if self.vim_normal_keymap.move_word_backward.is_pressed(event) {
-            self.set_cursor(self.beginning_of_previous_word());
+            for _ in 0..count {
+                self.set_cursor(self.beginning_of_previous_word());
+            }
             return;
         }
         if self.vim_normal_keymap.move_word_end.is_pressed(event) {
-            self.set_cursor(self.vim_word_end_cursor());
+            for _ in 0..count {
+                self.set_cursor(self.vim_word_end_cursor());
+            }
             return;
         }
         if self.vim_normal_keymap.move_line_start.is_pressed(event) {
@@ -768,12 +842,12 @@ impl TextArea {
             return;
         }
         if self.vim_normal_keymap.delete_char.is_pressed(event) {
-            self.delete_forward_kill(/*n*/ 1);
+            self.delete_forward_kill(count);
             return;
         }
         if self.vim_normal_keymap.substitute_char.is_pressed(event) {
             if self.cursor_pos < self.end_of_current_line() {
-                self.delete_forward_kill(/*n*/ 1);
+                self.delete_forward_kill(count);
             }
             self.vim_mode = VimMode::Insert;
             return;
@@ -788,11 +862,13 @@ impl TextArea {
             return;
         }
         if self.vim_normal_keymap.yank_line.is_pressed(event) {
-            self.yank_current_line();
+            self.yank_line_range(self.line_range_for_count(count));
             return;
         }
         if self.vim_normal_keymap.paste_after.is_pressed(event) {
-            self.paste_after_cursor();
+            for _ in 0..count {
+                self.paste_after_cursor();
+            }
             return;
         }
         if self
@@ -800,11 +876,17 @@ impl TextArea {
             .start_delete_operator
             .is_pressed(event)
         {
-            self.vim_pending = VimPending::Operator(VimOperator::Delete);
+            self.vim_pending = VimPending::Operator {
+                operator: VimOperator::Delete,
+                count,
+            };
             return;
         }
         if self.vim_normal_keymap.start_yank_operator.is_pressed(event) {
-            self.vim_pending = VimPending::Operator(VimOperator::Yank);
+            self.vim_pending = VimPending::Operator {
+                operator: VimOperator::Yank,
+                count,
+            };
             return;
         }
         if self
@@ -812,7 +894,10 @@ impl TextArea {
             .start_change_operator
             .is_pressed(event)
         {
-            self.vim_pending = VimPending::Operator(VimOperator::Change);
+            self.vim_pending = VimPending::Operator {
+                operator: VimOperator::Change,
+                count,
+            };
             return;
         }
         if self.vim_normal_keymap.cancel_operator.is_pressed(event) {
@@ -820,13 +905,18 @@ impl TextArea {
         }
     }
 
-    fn handle_vim_operator(&mut self, op: VimOperator, event: KeyEvent) -> bool {
+    fn handle_vim_operator(&mut self, op: VimOperator, count: usize, event: KeyEvent) -> bool {
         if op == VimOperator::Delete && self.vim_operator_keymap.delete_line.is_pressed(event) {
-            self.kill_current_line();
+            self.kill_line_range(self.line_range_for_count(count));
             return true;
         }
         if op == VimOperator::Yank && self.vim_operator_keymap.yank_line.is_pressed(event) {
-            self.yank_current_line();
+            self.yank_line_range(self.line_range_for_count(count));
+            return true;
+        }
+        if op == VimOperator::Change && self.vim_operator_keymap.change_line.is_pressed(event) {
+            let range = self.line_range_for_count(count);
+            self.change_line_range(range);
             return true;
         }
         if self.vim_operator_keymap.cancel.is_pressed(event) {
@@ -835,15 +925,32 @@ impl TextArea {
         if let Some(scope) = self.vim_text_object_scope_for_event(event) {
             self.vim_pending = VimPending::TextObject {
                 operator: op,
+                count,
                 scope,
             };
             return true;
         }
 
-        if op != VimOperator::Change
-            && let Some(motion) = self.vim_motion_for_event(event)
+        if op == VimOperator::Change
+            && self
+                .vim_operator_keymap
+                .motion_word_forward
+                .is_pressed(event)
         {
-            self.apply_vim_operator(op, motion);
+            if let Some(range) = self.range_for_change_word(count) {
+                self.apply_vim_operator_to_range(op, range);
+            }
+            return true;
+        }
+
+        if let Some(motion) = self.vim_motion_for_event(event) {
+            if op == VimOperator::Change && matches!(motion, VimMotion::Up | VimMotion::Down) {
+                if let Some(range) = self.linewise_range_for_vertical_motion(motion, count) {
+                    self.change_line_range(range);
+                }
+            } else {
+                self.apply_vim_operator(op, motion, count);
+            }
             return true;
         }
         false
@@ -852,6 +959,7 @@ impl TextArea {
     fn handle_vim_text_object(
         &mut self,
         op: VimOperator,
+        count: usize,
         scope: VimTextObjectScope,
         event: KeyEvent,
     ) -> bool {
@@ -861,7 +969,7 @@ impl TextArea {
         let Some(object) = self.vim_text_object_for_event(event) else {
             return false;
         };
-        if let Some(range) = self.text_object_range(object, scope) {
+        if let Some(range) = self.text_object_range(object, scope, count) {
             self.apply_vim_operator_to_range(op, range);
         }
         true
@@ -906,14 +1014,17 @@ impl TextArea {
         None
     }
 
-    fn apply_vim_operator(&mut self, op: VimOperator, motion: VimMotion) {
-        let Some(range) = self.range_for_motion(motion) else {
+    fn apply_vim_operator(&mut self, op: VimOperator, motion: VimMotion, count: usize) {
+        let Some(range) = self.range_for_motion(motion, count) else {
             return;
         };
         match op {
             VimOperator::Delete => self.kill_range(range),
             VimOperator::Yank => self.yank_range(range),
-            VimOperator::Change => {}
+            VimOperator::Change => {
+                self.kill_range(range);
+                self.vim_mode = VimMode::Insert;
+            }
         }
     }
 
@@ -928,12 +1039,12 @@ impl TextArea {
         }
     }
 
-    fn range_for_motion(&mut self, motion: VimMotion) -> Option<Range<usize>> {
+    fn range_for_motion(&mut self, motion: VimMotion, count: usize) -> Option<Range<usize>> {
         if matches!(motion, VimMotion::Up | VimMotion::Down) {
-            return self.linewise_range_for_vertical_motion(motion);
+            return self.linewise_range_for_vertical_motion(motion, count);
         }
         let start = self.cursor_pos;
-        let target = self.target_for_motion(motion);
+        let target = self.target_for_motion(motion, count);
         if start == target {
             return None;
         }
@@ -945,28 +1056,69 @@ impl TextArea {
         Some(range_start..range_end)
     }
 
-    fn linewise_range_for_vertical_motion(&self, motion: VimMotion) -> Option<Range<usize>> {
+    fn range_for_change_word(&self, count: usize) -> Option<Range<usize>> {
+        let start = self.cursor_pos;
+        let starts_on_whitespace = self.text[start..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace);
+        let mut end = if starts_on_whitespace {
+            self.beginning_of_next_word_from(start)
+        } else {
+            start
+        };
+        let remaining = count.saturating_sub(usize::from(starts_on_whitespace));
+        for _ in 0..remaining {
+            let next = self.end_of_next_word_from(end);
+            if next == end {
+                break;
+            }
+            end = next;
+        }
+        (start < end).then_some(start..end)
+    }
+
+    fn change_line_range(&mut self, range: Range<usize>) {
+        let start = range.start;
+        let has_trailing_newline = self.text[range.clone()].ends_with('\n');
+        self.kill_line_range(range);
+        if has_trailing_newline {
+            self.insert_str_at(start, "\n");
+        }
+        self.set_cursor(start);
+        self.vim_mode = VimMode::Insert;
+    }
+
+    fn linewise_range_for_vertical_motion(
+        &self,
+        motion: VimMotion,
+        count: usize,
+    ) -> Option<Range<usize>> {
         let current = self.current_line_range_with_newline();
         let range = match motion {
             VimMotion::Up => {
-                let start = if current.start == 0 {
-                    current.start
-                } else {
-                    self.beginning_of_line(current.start.saturating_sub(1))
-                };
+                let mut start = current.start;
+                for _ in 0..count {
+                    if start == 0 {
+                        break;
+                    }
+                    start = self.beginning_of_line(start.saturating_sub(1));
+                }
                 start..current.end
             }
             VimMotion::Down => {
-                let end = if current.end >= self.text.len() {
-                    current.end
-                } else {
-                    let next_eol = self.end_of_line(current.end);
-                    if next_eol < self.text.len() {
+                let mut end = current.end;
+                for _ in 0..count {
+                    if end >= self.text.len() {
+                        break;
+                    }
+                    let next_eol = self.end_of_line(end);
+                    end = if next_eol < self.text.len() {
                         next_eol + 1
                     } else {
                         next_eol
-                    }
-                };
+                    };
+                }
                 current.start..end
             }
             VimMotion::Left
@@ -980,19 +1132,21 @@ impl TextArea {
         (range.start < range.end).then_some(range)
     }
 
-    fn target_for_motion(&mut self, motion: VimMotion) -> usize {
+    fn target_for_motion(&mut self, motion: VimMotion, count: usize) -> usize {
         let original_cursor = self.cursor_pos;
         let original_preferred = self.preferred_col;
-        match motion {
-            VimMotion::Left => self.move_cursor_left(),
-            VimMotion::Right => self.move_cursor_right(),
-            VimMotion::Up => self.move_cursor_up(),
-            VimMotion::Down => self.move_cursor_down(),
-            VimMotion::WordForward => self.set_cursor(self.beginning_of_next_word()),
-            VimMotion::WordBackward => self.set_cursor(self.beginning_of_previous_word()),
-            VimMotion::WordEnd => self.set_cursor(self.vim_word_end_exclusive()),
-            VimMotion::LineStart => self.set_cursor(self.beginning_of_current_line()),
-            VimMotion::LineEnd => self.set_cursor(self.end_of_current_line()),
+        for _ in 0..count {
+            match motion {
+                VimMotion::Left => self.move_cursor_left(),
+                VimMotion::Right => self.move_cursor_right(),
+                VimMotion::Up => self.move_cursor_up(),
+                VimMotion::Down => self.move_cursor_down(),
+                VimMotion::WordForward => self.set_cursor(self.beginning_of_next_word()),
+                VimMotion::WordBackward => self.set_cursor(self.beginning_of_previous_word()),
+                VimMotion::WordEnd => self.set_cursor(self.vim_word_end_exclusive()),
+                VimMotion::LineStart => self.set_cursor(self.beginning_of_current_line()),
+                VimMotion::LineEnd => self.set_cursor(self.end_of_current_line()),
+            }
         }
         let target = self.cursor_pos;
         self.cursor_pos = original_cursor;
@@ -1199,11 +1353,6 @@ impl TextArea {
         self.set_cursor(cursor.min(self.text.len()));
     }
 
-    fn yank_current_line(&mut self) {
-        let range = self.current_line_range_with_newline();
-        self.yank_line_range(range);
-    }
-
     fn kill_current_line(&mut self) {
         let range = self.current_line_range_with_newline();
         self.kill_line_range(range);
@@ -1214,6 +1363,18 @@ impl TextArea {
         let eol = self.end_of_current_line();
         let end = if eol < self.text.len() { eol + 1 } else { eol };
         bol..end
+    }
+
+    fn line_range_for_count(&self, count: usize) -> Range<usize> {
+        let mut range = self.current_line_range_with_newline();
+        for _ in 1..count {
+            if range.end >= self.text.len() {
+                break;
+            }
+            let eol = self.end_of_line(range.end);
+            range.end = if eol < self.text.len() { eol + 1 } else { eol };
+        }
+        range
     }
 
     /// Move the cursor left by a single grapheme cluster.
@@ -1849,15 +2010,18 @@ impl TextArea {
     }
 
     pub(crate) fn beginning_of_next_word(&self) -> usize {
-        let Some(first_non_ws) = self.text[self.cursor_pos..].find(|c: char| !c.is_whitespace())
-        else {
+        self.beginning_of_next_word_from(self.cursor_pos)
+    }
+
+    fn beginning_of_next_word_from(&self, cursor_pos: usize) -> usize {
+        let Some(first_non_ws) = self.text[cursor_pos..].find(|c: char| !c.is_whitespace()) else {
             return self.text.len();
         };
-        let word_start = self.cursor_pos + first_non_ws;
-        if word_start != self.cursor_pos {
+        let word_start = cursor_pos + first_non_ws;
+        if word_start != cursor_pos {
             return self.adjust_pos_out_of_elements(word_start, /*prefer_start*/ true);
         }
-        let end = self.end_of_next_word();
+        let end = self.end_of_next_word_from(cursor_pos);
         if end >= self.text.len() {
             return self.text.len();
         }
@@ -2523,6 +2687,148 @@ mod tests {
     }
 
     #[test]
+    fn vim_change_word_deletes_to_word_end_and_enters_insert() {
+        for (cursor, expected_text, expected_kill) in
+            [(1, "h world", "ello"), (4, "hell world", "o")]
+        {
+            let mut t = ta_with("hello world");
+            t.set_cursor(cursor);
+            t.set_vim_enabled(/*enabled*/ true);
+            t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+            t.input(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+            assert_eq!(
+                (
+                    t.text(),
+                    t.kill_buffer.as_str(),
+                    t.cursor(),
+                    t.vim_mode_label()
+                ),
+                (expected_text, expected_kill, cursor, Some("Insert"))
+            );
+        }
+
+        let mut t = ta_with("  hello world");
+        t.set_cursor(/*pos*/ 0);
+        t.set_vim_enabled(/*enabled*/ true);
+        t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert_eq!(
+            (t.text(), t.kill_buffer.as_str(), t.vim_mode_label()),
+            ("hello world", "  ", Some("Insert"))
+        );
+    }
+
+    #[test]
+    fn vim_change_line_replaces_current_line_and_enters_insert() {
+        let mut t = ta_with("one\ntwo\nthree");
+        t.set_cursor(/*pos*/ "one\nt".len());
+        t.set_vim_enabled(/*enabled*/ true);
+
+        t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        assert_eq!(t.text(), "one\n\nthree");
+        assert_eq!(t.kill_buffer, "two\n");
+        assert_eq!(t.kill_buffer_kind, KillBufferKind::Linewise);
+        assert_eq!(t.cursor(), "one\n".len());
+        assert_eq!(t.vim_mode_label(), Some("Insert"));
+    }
+
+    #[test]
+    fn vim_counts_apply_to_commands_operators_and_motions() {
+        let cases = [
+            ("one two three", "2cw", " three", "one two", 0, "Insert"),
+            (
+                "one\ntwo\nthree\nfour",
+                "2dd",
+                "three\nfour",
+                "one\ntwo\n",
+                0,
+                "Normal",
+            ),
+            (
+                "one\ntwo\nthree",
+                "2cc",
+                "\nthree",
+                "one\ntwo\n",
+                0,
+                "Insert",
+            ),
+            ("one two three", "d2w", "three", "one two ", 0, "Normal"),
+            ("one two three", "2ciw", " three", "one two", 0, "Insert"),
+            ("one two three", "d2aw", "three", "one two ", 0, "Normal"),
+            (
+                "one two three four five six seven",
+                "2d3w",
+                "seven",
+                "one two three four five six ",
+                0,
+                "Normal",
+            ),
+            ("one two three", "2w2x", "one two ree", "th", 8, "Normal"),
+        ];
+        for (text, keys, expected_text, expected_kill, expected_cursor, expected_mode) in cases {
+            let mut t = ta_with(text);
+            t.set_cursor(/*pos*/ 0);
+            t.set_vim_enabled(/*enabled*/ true);
+            for key in keys.chars() {
+                t.input(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+            }
+            assert_eq!(
+                (
+                    t.text(),
+                    t.kill_buffer.as_str(),
+                    t.cursor(),
+                    t.vim_mode_label()
+                ),
+                (
+                    expected_text,
+                    expected_kill,
+                    expected_cursor,
+                    Some(expected_mode)
+                ),
+                "failed Vim key sequence {keys}"
+            );
+        }
+    }
+
+    #[test]
+    fn vim_change_operator_supports_configured_motions() {
+        let cases = [
+            ("hello", 1, "cl", "hllo", "e", 1),
+            ("hello world", 4, "cb", "o world", "hell", 0),
+            ("hello world", 1, "ce", "h world", "ello", 1),
+            ("hello world", 4, "c0", "o world", "hell", 0),
+            ("hello world", 1, "c$", "h", "ello world", 1),
+            ("one\ntwo", 0, "cj", "", "one\ntwo", 0),
+            ("one\ntwo", 4, "ck", "", "one\ntwo", 0),
+        ];
+        for (text, cursor, keys, expected_text, expected_kill, expected_cursor) in cases {
+            let mut t = ta_with(text);
+            t.set_cursor(cursor);
+            t.set_vim_enabled(/*enabled*/ true);
+            for key in keys.chars() {
+                t.input(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+            }
+            assert_eq!(
+                (
+                    t.text(),
+                    t.kill_buffer.as_str(),
+                    t.cursor(),
+                    t.vim_mode_label()
+                ),
+                (
+                    expected_text,
+                    expected_kill,
+                    expected_cursor,
+                    Some("Insert")
+                ),
+                "failed Vim key sequence {keys}"
+            );
+        }
+    }
+
+    #[test]
     fn vim_change_inner_word_deletes_word_and_enters_insert() {
         let mut t = ta_with("hello world");
         t.set_cursor(/*pos*/ "hello ".len());
@@ -2673,18 +2979,10 @@ mod tests {
     }
 
     #[test]
-    fn vim_text_object_cancellation_and_unsupported_change_motions_do_not_edit() {
+    fn vim_text_object_cancellation_does_not_edit() {
         let mut t = ta_with("hello world");
         t.set_cursor(/*pos*/ 1);
         t.set_vim_enabled(/*enabled*/ true);
-
-        t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        t.input(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
-
-        assert_eq!(t.text(), "hello world");
-        assert_eq!(t.kill_buffer, "");
-        assert_eq!(t.vim_mode_label(), Some("Normal"));
-        assert!(!t.is_vim_operator_pending());
 
         t.input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         t.input(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
