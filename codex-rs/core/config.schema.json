@@ -3432,14 +3432,17 @@
               "open_line_above": null,
               "open_line_below": null,
               "paste_after": null,
+              "redo": null,
               "start_change_operator": null,
               "start_delete_operator": null,
               "start_yank_operator": null,
               "substitute_char": null,
+              "undo": null,
               "yank_line": null
             },
             "vim_operator": {
               "cancel": null,
+              "change_line": null,
               "delete_line": null,
               "motion_down": null,
               "motion_left": null,
@@ -3476,6 +3479,19 @@
           ],
           "default": {},
           "description": "Startup tooltip availability NUX state persisted by the TUI."
+        },
+        "modes": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiModes"
+            }
+          ],
+          "default": {
+            "vim": {
+              "insert_mode_default": false
+            }
+          },
+          "description": "Behavior settings for optional TUI editing modes."
         },
         "notification_condition": {
           "allOf": [
@@ -3581,7 +3597,7 @@
         },
         "vim_mode_default": {
           "default": false,
-          "description": "Start the composer in Vim mode (`Normal`) by default. Defaults to `false`.",
+          "description": "Enable Vim editing in the composer by default. Defaults to `false`.",
           "type": "boolean"
         }
       },
@@ -4141,10 +4157,12 @@
             "open_line_above": null,
             "open_line_below": null,
             "paste_after": null,
+            "redo": null,
             "start_change_operator": null,
             "start_delete_operator": null,
             "start_yank_operator": null,
             "substitute_char": null,
+            "undo": null,
             "yank_line": null
           }
         },
@@ -4156,6 +4174,7 @@
           ],
           "default": {
             "cancel": null,
+            "change_line": null,
             "delete_line": null,
             "motion_down": null,
             "motion_left": null,
@@ -4279,6 +4298,24 @@
       },
       "type": "object"
     },
+    "TuiModes": {
+      "additionalProperties": false,
+      "description": "Settings that control the behavior of optional TUI editing modes.",
+      "properties": {
+        "vim": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiVimMode"
+            }
+          ],
+          "default": {
+            "insert_mode_default": false
+          },
+          "description": "Vim-mode behavior settings."
+        }
+      },
+      "type": "object"
+    },
     "TuiPagerKeymap": {
       "additionalProperties": false,
       "description": "Pager context keybindings for transcript and static overlays.",
@@ -4383,6 +4420,18 @@
           "type": "string"
         }
       ]
+    },
+    "TuiVimMode": {
+      "additionalProperties": false,
+      "description": "Behavior settings applied while Vim editing is enabled.",
+      "properties": {
+        "insert_mode_default": {
+          "default": false,
+          "description": "Start each new composer message in insert mode instead of normal mode. Defaults to `false`.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "TuiVimNormalKeymap": {
       "additionalProperties": false,
@@ -4548,13 +4597,21 @@
           ],
           "description": "Paste after cursor (`p`)."
         },
+        "redo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Redo the latest undone edit (`Ctrl+R`)."
+        },
         "start_change_operator": {
           "allOf": [
             {
               "$ref": "#/definitions/KeybindingsSpec"
             }
           ],
-          "description": "Begin change operator; next keys select a text object."
+          "description": "Begin change operator; next keys select a motion or text object."
         },
         "start_delete_operator": {
           "allOf": [
@@ -4580,6 +4637,14 @@
           ],
           "description": "Delete character under cursor and enter insert mode (`s`)."
         },
+        "undo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Undo the latest edit (`u`)."
+        },
         "yank_line": {
           "allOf": [
             {
@@ -4593,7 +4658,7 @@
     },
     "TuiVimOperatorKeymap": {
       "additionalProperties": false,
-      "description": "Vim operator-pending keybindings for modal editing inside text areas.\n\nThis context is active only while waiting for a motion after `d` or `y`. Repeating the operator key (`dd`, `yy`) targets the entire line. Pressing `Esc` cancels the pending operator and returns to normal mode without modifying text.",
+      "description": "Vim operator-pending keybindings for modal editing inside text areas.\n\nThis context is active only while waiting for a motion after `d`, `y`, or `c`. Repeating the operator key (`dd`, `yy`, `cc`) targets the entire line. Pressing `Esc` cancels the pending operator and returns to normal mode without modifying text.",
       "properties": {
         "cancel": {
           "allOf": [
@@ -4602,6 +4667,14 @@
             }
           ],
           "description": "Cancel the pending operator and return to normal mode."
+        },
+        "change_line": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Repeat change operator to change the whole line (`cc`)."
         },
         "delete_line": {
           "allOf": [

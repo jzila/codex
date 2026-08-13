@@ -623,7 +623,7 @@ mod tests {
             .record_local_submission(HistoryEntry::new("git status".to_string()));
         composer.set_vim_enabled(/*enabled*/ true);
 
-        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        let _ = composer.begin_history_search();
         for ch in ['g', 'i', 't'] {
             let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
         }

@@ -757,8 +757,11 @@ pub struct Config {
     /// Persisted startup availability NUX state for model tooltips.
     pub model_availability_nux: ModelAvailabilityNuxConfig,
 
-    /// Start the composer in Vim mode (`Normal`) by default.
+    /// Enable Vim editing in the composer by default.
     pub tui_vim_mode_default: bool,
+
+    /// Start each new Vim-mode composer message in insert mode.
+    pub tui_vim_insert_mode_default: bool,
 
     /// Start the TUI in raw scrollback mode for copy-friendly transcript output.
     pub tui_raw_output_mode: bool,
@@ -4260,6 +4263,11 @@ impl Config {
                 .tui
                 .as_ref()
                 .map(|t| t.vim_mode_default)
+                .unwrap_or(false),
+            tui_vim_insert_mode_default: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.modes.vim.insert_mode_default)
                 .unwrap_or(false),
             tui_raw_output_mode: cfg
                 .tui

@@ -1097,6 +1097,7 @@ fn config_toml_deserializes_model_availability_nux() {
             animations: true,
             show_tooltips: true,
             vim_mode_default: false,
+            modes: Default::default(),
             raw_output_mode: false,
             alternate_screen: AltScreenMode::default(),
             status_line: None,
@@ -1209,6 +1210,25 @@ fn test_tui_vim_mode_default_true() {
             .tui
             .expect("config should include tui section")
             .vim_mode_default
+    );
+}
+
+#[test]
+fn test_tui_vim_insert_mode_default_round_trips() {
+    let toml = r#"
+        [tui.modes.vim]
+        insert_mode_default = true
+    "#;
+    let parsed: ConfigToml = toml::from_str(toml).expect("deserialize Vim mode behavior settings");
+    let serialized = toml::Value::try_from(parsed).expect("serialize Vim mode behavior settings");
+
+    assert_eq!(
+        serialized
+            .get("tui")
+            .and_then(|tui| tui.get("modes"))
+            .and_then(|modes| modes.get("vim"))
+            .and_then(|vim| vim.get("insert_mode_default")),
+        Some(&toml::Value::Boolean(true))
     );
 }
 
@@ -3985,6 +4005,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             animations: true,
             show_tooltips: true,
             vim_mode_default: false,
+            modes: Default::default(),
             raw_output_mode: false,
             alternate_screen: AltScreenMode::Auto,
             status_line: None,

@@ -22,9 +22,13 @@ pub(super) enum VimOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VimPending {
     None,
-    Operator(VimOperator),
+    Operator {
+        operator: VimOperator,
+        count: usize,
+    },
     TextObject {
         operator: VimOperator,
+        count: usize,
         scope: VimTextObjectScope,
     },
 }
@@ -114,13 +118,18 @@ impl TextArea {
         &self,
         object: VimTextObject,
         scope: VimTextObjectScope,
+        count: usize,
     ) -> Option<Range<usize>> {
         match object {
-            VimTextObject::Word => self.word_text_object_range(scope, /*big_word*/ false),
-            VimTextObject::BigWord => self.word_text_object_range(scope, /*big_word*/ true),
-            VimTextObject::Parentheses => self.paired_text_object_range(scope, '(', ')'),
-            VimTextObject::Brackets => self.paired_text_object_range(scope, '[', ']'),
-            VimTextObject::Braces => self.paired_text_object_range(scope, '{', '}'),
+            VimTextObject::Word => {
+                self.word_text_object_range(scope, /*big_word*/ false, count)
+            }
+            VimTextObject::BigWord => {
+                self.word_text_object_range(scope, /*big_word*/ true, count)
+            }
+            VimTextObject::Parentheses => self.paired_text_object_range(scope, '(', ')', count),
+            VimTextObject::Brackets => self.paired_text_object_range(scope, '[', ']', count),
+            VimTextObject::Braces => self.paired_text_object_range(scope, '{', '}', count),
             VimTextObject::DoubleQuote => self.quoted_text_object_range(scope, '"'),
             VimTextObject::SingleQuote => self.quoted_text_object_range(scope, '\''),
             VimTextObject::Backtick => self.quoted_text_object_range(scope, '`'),
@@ -131,43 +140,32 @@ impl TextArea {
         &self,
         scope: VimTextObjectScope,
         big_word: bool,
+        count: usize,
     ) -> Option<Range<usize>> {
-        let inner = if big_word {
-            self.big_word_range_at_cursor()?
+        let ranges = if big_word {
+            self.non_ws_runs()
         } else {
-            self.small_word_range_at_cursor()?
+            self.small_word_ranges()
         };
+        let index = ranges.iter().position(|range| {
+            self.cursor_overlaps_range(range) || self.cursor_is_at_range_end(range)
+        })?;
+        let last = ranges.get(index.saturating_add(count).saturating_sub(1))?;
+        let inner = ranges[index].start..last.end;
         Some(match scope {
             VimTextObjectScope::Inner => inner,
             VimTextObjectScope::Around => self.expand_word_around(inner),
         })
     }
 
-    fn big_word_range_at_cursor(&self) -> Option<Range<usize>> {
-        self.non_ws_runs()
-            .into_iter()
-            .find(|range| self.cursor_overlaps_range(range) || self.cursor_is_at_range_end(range))
-    }
-
-    fn small_word_range_at_cursor(&self) -> Option<Range<usize>> {
+    fn small_word_ranges(&self) -> Vec<Range<usize>> {
+        let mut ranges = Vec::new();
         for run in self.non_ws_runs() {
-            if !self.cursor_overlaps_range(&run) && !self.cursor_is_at_range_end(&run) {
-                continue;
-            }
-            let mut last_piece = None;
             for (piece_start, piece) in split_word_pieces(&self.text[run.clone()]) {
-                let piece = run.start + piece_start..run.start + piece_start + piece.len();
-                if self.cursor_overlaps_range(&piece) {
-                    return Some(piece);
-                }
-                last_piece = Some(piece);
+                ranges.push(run.start + piece_start..run.start + piece_start + piece.len());
             }
-            if self.cursor_is_at_range_end(&run) {
-                return last_piece.or(Some(run));
-            }
-            return Some(run);
         }
-        None
+        ranges
     }
 
     fn non_ws_runs(&self) -> Vec<Range<usize>> {
@@ -231,9 +229,10 @@ impl TextArea {
         scope: VimTextObjectScope,
         open: char,
         close: char,
+        count: usize,
     ) -> Option<Range<usize>> {
         let mut stack: Vec<usize> = Vec::new();
-        let mut best: Option<Range<usize>> = None;
+        let mut candidates = Vec::new();
         for (idx, ch) in self.text.char_indices() {
             if self.is_inside_element(idx) {
                 continue;
@@ -250,17 +249,14 @@ impl TextArea {
                         VimTextObjectScope::Inner => open_idx + open.len_utf8()..idx,
                         VimTextObjectScope::Around => open_idx..close_end,
                     };
-                    if candidate.start <= candidate.end
-                        && best
-                            .as_ref()
-                            .is_none_or(|current| candidate.len() < current.len())
-                    {
-                        best = Some(candidate);
+                    if candidate.start <= candidate.end {
+                        candidates.push(candidate);
                     }
                 }
             }
         }
-        best
+        candidates.sort_by_key(Range::len);
+        candidates.into_iter().nth(count.saturating_sub(1))
     }
 
     fn quoted_text_object_range(
