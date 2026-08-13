@@ -42,14 +42,34 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 mod vim;
+pub(crate) mod vim_history;
 mod wrapping;
 use self::vim::VimMode;
 use self::vim::VimMotion;
 use self::vim::VimOperator;
 use self::vim::VimPending;
 use self::vim::VimTextObjectScope;
+use self::vim_history::VimEditSnapshot;
+use self::vim_history::VimHistory;
 
 const WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum VimHistoryEvent {
+    #[default]
+    None,
+    InsertStarted,
+    InsertFinished {
+        changed: bool,
+    },
+    EditRecorded,
+    Undo {
+        steps: usize,
+    },
+    Redo {
+        steps: usize,
+    },
+}
 
 fn is_word_separator(ch: char) -> bool {
     WORD_SEPARATORS.contains(ch)
@@ -93,7 +113,7 @@ fn text_for_display(text: &str) -> Cow<'_, str> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TextElement {
     id: u64,
     range: Range<usize>,
@@ -127,6 +147,10 @@ pub(crate) struct TextArea {
     vim_enabled: bool,
     vim_mode: VimMode,
     vim_pending: VimPending,
+    vim_history: VimHistory<VimEditSnapshot>,
+    vim_history_event: VimHistoryEvent,
+    vim_external_edit_start: Option<VimEditSnapshot>,
+    vim_insert_external_content_changed: bool,
     editor_keymap: EditorKeymap,
     vim_normal_keymap: VimNormalKeymap,
     vim_operator_keymap: VimOperatorKeymap,
@@ -168,6 +192,10 @@ impl TextArea {
             vim_enabled: false,
             vim_mode: VimMode::Insert,
             vim_pending: VimPending::None,
+            vim_history: VimHistory::default(),
+            vim_history_event: VimHistoryEvent::None,
+            vim_external_edit_start: None,
+            vim_insert_external_content_changed: false,
             editor_keymap: defaults.editor,
             vim_normal_keymap: defaults.vim_normal,
             vim_operator_keymap: defaults.vim_operator,
@@ -236,6 +264,10 @@ impl TextArea {
         self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
         self.wrap_cache.replace(None);
         self.preferred_col = None;
+        self.vim_pending = VimPending::None;
+        self.vim_history.clear();
+        self.vim_external_edit_start = None;
+        self.vim_insert_external_content_changed = false;
     }
 
     /// Enable or disable modal Vim editing for the textarea.
@@ -247,6 +279,9 @@ impl TextArea {
     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
         self.vim_enabled = enabled;
         self.vim_pending = VimPending::None;
+        self.vim_history.clear();
+        self.vim_external_edit_start = None;
+        self.vim_insert_external_content_changed = false;
         self.vim_mode = if enabled {
             VimMode::Normal
         } else {
@@ -348,6 +383,13 @@ impl TextArea {
             && event.code == KeyCode::Esc
             && event.modifiers == KeyModifiers::NONE
             && matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+    }
+
+    /// Return whether Vim normal mode owns this key as redo.
+    pub(crate) fn should_handle_vim_redo(&self, event: KeyEvent) -> bool {
+        self.is_vim_normal_mode()
+            && matches!(self.vim_pending, VimPending::None)
+            && self.vim_normal_keymap.redo.is_pressed(event)
     }
 
     /// Return the footer label for the active Vim mode.
@@ -524,11 +566,12 @@ impl TextArea {
         self.end_of_line(self.cursor_pos)
     }
 
-    pub fn input(&mut self, event: KeyEvent) {
+    pub fn input(&mut self, event: KeyEvent) -> VimHistoryEvent {
+        self.vim_history_event = VimHistoryEvent::None;
         // Only process key presses or repeats; ignore releases to avoid inserting
         // characters on key-up events when modifiers are no longer reported.
         if !matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-            return;
+            return VimHistoryEvent::None;
         }
         if self.vim_enabled {
             self.handle_vim_input(event);
@@ -536,6 +579,7 @@ impl TextArea {
             let keymap = self.editor_keymap.clone();
             self.input_with_keymap(event, &keymap);
         }
+        self.vim_history_event
     }
 
     pub fn input_with_keymap(&mut self, event: KeyEvent, keymap: &EditorKeymap) {
@@ -657,10 +701,98 @@ impl TextArea {
     }
 
     fn handle_vim_input(&mut self, event: KeyEvent) {
+        let was_insert = self.vim_mode == VimMode::Insert;
+        let is_history_action = self.vim_mode == VimMode::Normal
+            && matches!(self.vim_pending, VimPending::None)
+            && (self.vim_normal_keymap.undo.is_pressed(event)
+                || self.vim_normal_keymap.redo.is_pressed(event));
+        let before = self.vim_edit_snapshot();
         match self.vim_mode {
             VimMode::Insert => self.handle_vim_insert(event),
             VimMode::Normal => self.handle_vim_normal(event),
         }
+        if is_history_action {
+            return;
+        }
+        let after = self.vim_edit_snapshot();
+        if was_insert {
+            if self.vim_mode == VimMode::Normal {
+                let content_changed = self.vim_insert_external_content_changed
+                    || self
+                        .vim_history
+                        .insert_start()
+                        .is_some_and(|start| !start.has_same_content(&after));
+                self.vim_insert_external_content_changed = false;
+                let changed = self.vim_history.finish_insert(content_changed);
+                self.vim_history_event = VimHistoryEvent::InsertFinished { changed };
+            } else {
+                if self.vim_history.begin_insert(before) {
+                    self.vim_history_event = VimHistoryEvent::InsertStarted;
+                }
+            }
+        } else if self.vim_mode == VimMode::Insert {
+            if self.vim_history.begin_insert(before) {
+                self.vim_history_event = VimHistoryEvent::InsertStarted;
+            }
+        } else if !before.has_same_content(&after) {
+            self.vim_history.record_edit(before);
+            self.vim_history_event = VimHistoryEvent::EditRecorded;
+        }
+    }
+
+    pub(crate) fn begin_vim_external_edit(&mut self) -> VimHistoryEvent {
+        if !self.vim_enabled {
+            return VimHistoryEvent::None;
+        }
+        let before = self.vim_edit_snapshot();
+        if self.vim_mode == VimMode::Insert {
+            if self.vim_history.begin_insert(before) {
+                VimHistoryEvent::InsertStarted
+            } else {
+                VimHistoryEvent::None
+            }
+        } else {
+            self.vim_external_edit_start = Some(before);
+            VimHistoryEvent::None
+        }
+    }
+
+    pub(crate) fn finish_vim_external_edit(
+        &mut self,
+        external_content_changed: bool,
+    ) -> VimHistoryEvent {
+        if self.vim_mode == VimMode::Insert {
+            self.vim_insert_external_content_changed |= external_content_changed;
+            return VimHistoryEvent::None;
+        }
+        let Some(before) = self.vim_external_edit_start.take() else {
+            return VimHistoryEvent::None;
+        };
+        if !external_content_changed && before.has_same_content(&self.vim_edit_snapshot()) {
+            return VimHistoryEvent::None;
+        }
+        self.vim_history.record_edit(before);
+        VimHistoryEvent::EditRecorded
+    }
+
+    fn vim_edit_snapshot(&self) -> VimEditSnapshot {
+        VimEditSnapshot {
+            text: self.text.clone(),
+            cursor_pos: self.cursor_pos,
+            elements: self.elements.clone(),
+            next_element_id: self.next_element_id,
+        }
+    }
+
+    fn restore_vim_edit_snapshot(&mut self, snapshot: VimEditSnapshot) {
+        self.text = snapshot.text;
+        self.cursor_pos = snapshot.cursor_pos;
+        self.elements = snapshot.elements;
+        self.next_element_id = snapshot.next_element_id;
+        self.vim_mode = VimMode::Normal;
+        self.vim_pending = VimPending::None;
+        self.preferred_col = None;
+        self.wrap_cache.replace(None);
     }
 
     fn handle_vim_insert(&mut self, event: KeyEvent) {
@@ -680,14 +812,33 @@ impl TextArea {
         let pending = std::mem::replace(&mut self.vim_pending, VimPending::None);
         match pending {
             VimPending::None => {}
-            VimPending::Operator(op) => {
-                self.handle_vim_operator(op, event);
+            VimPending::Operator(operator) => {
+                self.handle_vim_operator(operator, event);
                 return;
             }
             VimPending::TextObject { operator, scope } => {
                 self.handle_vim_text_object(operator, scope, event);
                 return;
             }
+        }
+
+        if self.vim_normal_keymap.undo.is_pressed(event) {
+            let current = self.vim_edit_snapshot();
+            let (snapshot, steps) = self.vim_history.undo(current, /*count*/ 1);
+            if let Some(snapshot) = snapshot {
+                self.restore_vim_edit_snapshot(snapshot);
+            }
+            self.vim_history_event = VimHistoryEvent::Undo { steps };
+            return;
+        }
+        if self.vim_normal_keymap.redo.is_pressed(event) {
+            let current = self.vim_edit_snapshot();
+            let (snapshot, steps) = self.vim_history.redo(current, /*count*/ 1);
+            if let Some(snapshot) = snapshot {
+                self.restore_vim_edit_snapshot(snapshot);
+            }
+            self.vim_history_event = VimHistoryEvent::Redo { steps };
+            return;
         }
 
         if self.vim_normal_keymap.enter_insert.is_pressed(event) {
@@ -2523,6 +2674,76 @@ mod tests {
     }
 
     #[test]
+    fn vim_undo_and_redo_group_an_insert_session() {
+        let mut t = ta_with("");
+        t.set_vim_enabled(/*enabled*/ true);
+
+        for key in ['i', 'a', 'b'] {
+            t.input(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+        }
+        t.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(t.text(), "ab");
+
+        t.input(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert_eq!(t.text(), "");
+        assert_eq!(t.cursor(), 0);
+        assert_eq!(t.vim_mode_label(), Some("Normal"));
+
+        t.input(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(t.text(), "ab");
+        assert_eq!(t.cursor(), 1);
+        assert_eq!(t.vim_mode_label(), Some("Normal"));
+    }
+
+    #[test]
+    fn vim_undo_and_redo_restore_normal_mode_edits() {
+        let mut t = ta_with("one two");
+        t.set_cursor(/*pos*/ 0);
+        t.set_vim_enabled(/*enabled*/ true);
+
+        t.input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert_eq!(t.text(), "two");
+
+        t.input(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert_eq!(t.text(), "one two");
+        assert_eq!(t.cursor(), 0);
+
+        t.input(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(t.text(), "two");
+        assert_eq!(t.cursor(), 0);
+    }
+
+    #[test]
+    fn vim_new_edit_clears_redo_history() {
+        let mut t = ta_with("abc");
+        t.set_cursor(/*pos*/ 0);
+        t.set_vim_enabled(/*enabled*/ true);
+
+        t.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert_eq!(t.text(), "bc");
+        assert_eq!(t.cursor(), 0);
+    }
+
+    #[test]
+    fn vim_fresh_buffer_cannot_undo_into_previous_message() {
+        let mut t = ta_with("message");
+        t.set_cursor(/*pos*/ 0);
+        t.set_vim_enabled(/*enabled*/ true);
+
+        t.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        t.set_text_clearing_elements("");
+        t.input(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+
+        assert_eq!(t.text(), "");
+        assert_eq!(t.cursor(), 0);
+    }
+
+    #[test]
     fn vim_change_inner_word_deletes_word_and_enters_insert() {
         let mut t = ta_with("hello world");
         t.set_cursor(/*pos*/ "hello ".len());
@@ -2673,18 +2894,10 @@ mod tests {
     }
 
     #[test]
-    fn vim_text_object_cancellation_and_unsupported_change_motions_do_not_edit() {
+    fn vim_text_object_cancellation_does_not_edit() {
         let mut t = ta_with("hello world");
         t.set_cursor(/*pos*/ 1);
         t.set_vim_enabled(/*enabled*/ true);
-
-        t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        t.input(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
-
-        assert_eq!(t.text(), "hello world");
-        assert_eq!(t.kill_buffer, "");
-        assert_eq!(t.vim_mode_label(), Some("Normal"));
-        assert!(!t.is_vim_operator_pending());
 
         t.input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         t.input(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));

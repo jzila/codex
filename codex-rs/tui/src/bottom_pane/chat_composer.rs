@@ -291,6 +291,8 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
 use crate::bottom_pane::textarea::TextArea;
+use crate::bottom_pane::textarea::VimHistoryEvent;
+use crate::bottom_pane::textarea::vim_history::VimHistory;
 use crate::clipboard_paste::normalize_pasted_path;
 use crate::clipboard_paste::pasted_image_format;
 use crate::history_cell;
@@ -506,6 +508,7 @@ pub(crate) struct ChatComposer {
     history_search_next_keys: Vec<KeyBinding>,
     editor_keymap: EditorKeymap,
     vim_normal_keymap: VimNormalKeymap,
+    vim_composer_history: VimHistory<VimComposerSnapshot>,
 }
 
 /// A resolved legacy `$` target plus any catalog built while disambiguating shell syntax.
@@ -524,6 +527,22 @@ struct ComposerDraft {
     mention_bindings: Vec<MentionBinding>,
     pending_pastes: Vec<(String, String)>,
     cursor: usize,
+}
+
+#[derive(Clone, Debug)]
+struct VimComposerSnapshot {
+    is_bash_mode: bool,
+    pending_pastes: Vec<(String, String)>,
+    attachments: AttachmentState,
+}
+
+impl VimComposerSnapshot {
+    fn has_same_history_content(&self, other: &Self) -> bool {
+        self.is_bash_mode == other.is_bash_mode
+            && self.pending_pastes == other.pending_pastes
+            && self.attachments.local_images == other.attachments.local_images
+            && self.attachments.remote_image_urls == other.attachments.remote_image_urls
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -692,6 +711,7 @@ impl ChatComposer {
             history_search_next_keys: default_keymap.composer.history_search_next.clone(),
             editor_keymap: default_editor_keymap,
             vim_normal_keymap: default_vim_normal_keymap,
+            vim_composer_history: VimHistory::default(),
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -1132,6 +1152,7 @@ impl ChatComposer {
     pub fn handle_paste(&mut self, pasted: String) -> bool {
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let pasted = sanitize_user_text(pasted.into());
+        let vim_edit = self.begin_vim_external_edit();
         let char_count = pasted.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             let placeholder = self.next_large_paste_placeholder(char_count);
@@ -1145,8 +1166,10 @@ impl ChatComposer {
         {
             self.draft.textarea.insert_str(" ");
         } else {
-            self.insert_str(&pasted);
+            self.draft.textarea.insert_str(&pasted);
+            self.sync_bash_mode_from_text();
         }
+        self.finish_vim_external_edit(vim_edit);
         self.draft.paste_burst.clear_after_explicit_paste();
         self.sync_popups();
         true
@@ -1165,7 +1188,7 @@ impl ChatComposer {
                 tracing::debug!("image dimensions={}x{}", width, height);
                 let format = pasted_image_format(&path_buf);
                 tracing::debug!("attached image format={}", format.label());
-                self.attach_image(path_buf);
+                self.attach_image_raw(path_buf);
                 true
             }
             Err(err) => {
@@ -1244,6 +1267,7 @@ impl ChatComposer {
 
         // Rebuild textarea so placeholders become elements again.
         self.draft.textarea.set_text_clearing_elements("");
+        self.vim_composer_history.clear();
         let mut remaining: HashMap<&str, usize> = HashMap::new();
         for img in &self.attachments.local_images {
             *remaining.entry(img.placeholder.as_str()).or_insert(0) += 1;
@@ -1294,6 +1318,7 @@ impl ChatComposer {
     /// footer mode so the visible hints match the new editing surface.
     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
         self.draft.textarea.set_vim_enabled(enabled);
+        self.vim_composer_history.clear();
         self.draft.paste_burst.clear_after_explicit_paste();
         self.footer.mode = reset_mode_after_activity(self.footer.mode);
     }
@@ -1324,6 +1349,11 @@ impl ChatComposer {
         self.draft
             .textarea
             .should_handle_vim_insert_escape(key_event)
+    }
+
+    /// Return whether Vim normal mode owns this key as redo.
+    pub(crate) fn should_handle_vim_redo(&self, key_event: KeyEvent) -> bool {
+        self.draft.textarea.should_handle_vim_redo(key_event)
     }
 
     fn vim_mode_indicator_span(&self) -> Option<Span<'static>> {
@@ -1494,6 +1524,7 @@ impl ChatComposer {
     ) {
         // Clear any existing content, placeholders, and attachments first.
         self.draft.textarea.set_text_clearing_elements("");
+        self.vim_composer_history.clear();
         self.draft.is_bash_mode = false;
         self.draft.pending_pastes.clear();
         self.draft.mention_bindings.clear();
@@ -1758,6 +1789,12 @@ impl ChatComposer {
 
     /// Insert an attachment placeholder and track it for the next submission.
     pub fn attach_image(&mut self, path: PathBuf) {
+        let vim_edit = self.begin_vim_external_edit();
+        self.attach_image_raw(path);
+        self.finish_vim_external_edit(vim_edit);
+    }
+
+    fn attach_image_raw(&mut self, path: PathBuf) {
         self.attachments
             .attach_image(&mut self.draft.textarea, path);
     }
@@ -1885,9 +1922,33 @@ impl ChatComposer {
     }
 
     pub(crate) fn insert_str(&mut self, text: &str) {
+        let vim_edit = self.begin_vim_external_edit();
         self.draft.textarea.insert_str(text);
+        self.finish_vim_external_edit(vim_edit);
         self.sync_bash_mode_from_text();
         self.sync_popups();
+    }
+
+    fn begin_vim_external_edit(&mut self) -> Option<(VimComposerSnapshot, VimHistoryEvent)> {
+        self.draft.textarea.is_vim_enabled().then(|| {
+            let snapshot = self.vim_composer_snapshot();
+            let event = self.draft.textarea.begin_vim_external_edit();
+            (snapshot, event)
+        })
+    }
+
+    fn finish_vim_external_edit(&mut self, edit: Option<(VimComposerSnapshot, VimHistoryEvent)>) {
+        let Some((before, begin_event)) = edit else {
+            return;
+        };
+        let composer_content_changed =
+            !before.has_same_history_content(&self.vim_composer_snapshot());
+        let finish_event = self
+            .draft
+            .textarea
+            .finish_vim_external_edit(composer_content_changed);
+        self.apply_vim_composer_history_event(begin_event, before.clone());
+        self.apply_vim_composer_history_event(finish_event, before);
     }
 
     /// Handle a key event coming from the main UI.
@@ -1904,7 +1965,9 @@ impl ChatComposer {
             return self.handle_history_search_key(key_event);
         }
 
-        if Self::is_history_search_key(&key_event, &self.history_search_previous_keys) {
+        if Self::is_history_search_key(&key_event, &self.history_search_previous_keys)
+            && !self.should_handle_vim_redo(key_event)
+        {
             return self.begin_history_search();
         }
 
@@ -1959,7 +2022,7 @@ impl ChatComposer {
         if self.draft.disable_paste_burst {
             // When burst detection is disabled, treat IME/non-ASCII input as normal typing.
             // In particular, do not retro-capture or buffer already-inserted prefix text.
-            self.draft.textarea.input(input);
+            self.input_textarea(input);
             let text_after = self.draft.textarea.text();
             self.draft
                 .pending_pastes
@@ -2020,7 +2083,7 @@ impl ChatComposer {
         if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
             self.handle_paste(pasted);
         }
-        self.draft.textarea.input(input);
+        self.input_textarea(input);
 
         let text_after = self.draft.textarea.text();
         self.draft
@@ -2905,6 +2968,7 @@ impl ChatComposer {
         let input_starts_with_space = original_input.starts_with(' ');
         self.draft.recent_submission_mention_bindings.clear();
         self.draft.textarea.set_text_clearing_elements("");
+        self.vim_composer_history.clear();
         self.draft.is_bash_mode = false;
 
         if pending_paste_handling == PendingPasteHandling::Expand
@@ -3185,6 +3249,7 @@ impl ChatComposer {
         }
         self.stage_slash_command_history(&command);
         self.draft.textarea.set_text_clearing_elements("");
+        self.vim_composer_history.clear();
         self.draft.is_bash_mode = false;
         Some(match command {
             SlashCommandItem::Builtin(cmd) => InputResult::Command(cmd),
@@ -3303,8 +3368,12 @@ impl ChatComposer {
         &mut self,
         key_event: &KeyEvent,
     ) -> Option<(InputResult, bool)> {
-        self.attachments
-            .handle_remote_image_selection_key(key_event, &mut self.draft.textarea)
+        let vim_edit = self.begin_vim_external_edit();
+        let result = self
+            .attachments
+            .handle_remote_image_selection_key(key_event, &mut self.draft.textarea);
+        self.finish_vim_external_edit(vim_edit);
+        result
     }
 
     /// Handle key event when no popup is visible.
@@ -3348,6 +3417,7 @@ impl ChatComposer {
         {
             self.footer.mode = reset_mode_after_activity(self.footer.mode);
             self.draft.textarea.set_text_clearing_elements("/");
+            self.vim_composer_history.clear();
             self.draft
                 .textarea
                 .set_cursor(self.draft.textarea.text().len());
@@ -3594,15 +3664,6 @@ impl ChatComposer {
             self.handle_paste(pasted);
         }
         // For non-char inputs (or after flushing), handle normally.
-        // Track element removals so we can drop any corresponding placeholders without scanning
-        // the full text. (Placeholders are atomic elements; when deleted, the element disappears.)
-        let elements_before = if self.draft.pending_pastes.is_empty() && self.attachments.is_empty()
-        {
-            None
-        } else {
-            Some(self.draft.textarea.element_payloads())
-        };
-
         if self.draft.is_bash_mode
             && matches!(input.code, KeyCode::Backspace)
             && self.draft.textarea.cursor() == 0
@@ -3611,12 +3672,8 @@ impl ChatComposer {
             return (InputResult::None, true);
         }
 
-        self.draft.textarea.input(input);
+        self.input_textarea(input);
         self.sync_bash_mode_from_text();
-
-        if let Some(elements_before) = elements_before {
-            self.reconcile_deleted_elements(elements_before);
-        }
 
         // Update paste-burst heuristic for plain Char (no Ctrl/Alt) events.
         let crossterm::event::KeyEvent {
@@ -3646,6 +3703,81 @@ impl ChatComposer {
             self.draft.textarea.replace_range(0..1, "");
             self.draft.is_bash_mode = true;
         }
+    }
+
+    fn input_textarea(&mut self, input: KeyEvent) {
+        let vim_before = self
+            .draft
+            .textarea
+            .is_vim_enabled()
+            .then(|| self.vim_composer_snapshot());
+        let elements_before = if self.draft.pending_pastes.is_empty() && self.attachments.is_empty()
+        {
+            None
+        } else {
+            Some(self.draft.textarea.element_payloads())
+        };
+        let event = self.draft.textarea.input(input);
+
+        if matches!(
+            event,
+            VimHistoryEvent::Undo { .. } | VimHistoryEvent::Redo { .. }
+        ) {
+            if let Some(before) = vim_before {
+                self.apply_vim_composer_history_event(event, before);
+            }
+            return;
+        }
+
+        if let Some(elements_before) = elements_before {
+            self.reconcile_deleted_elements(elements_before);
+        }
+        if let Some(before) = vim_before {
+            self.apply_vim_composer_history_event(event, before);
+        }
+    }
+
+    fn vim_composer_snapshot(&self) -> VimComposerSnapshot {
+        VimComposerSnapshot {
+            is_bash_mode: self.draft.is_bash_mode,
+            pending_pastes: self.draft.pending_pastes.clone(),
+            attachments: self.attachments.clone(),
+        }
+    }
+
+    fn apply_vim_composer_history_event(
+        &mut self,
+        event: VimHistoryEvent,
+        before: VimComposerSnapshot,
+    ) {
+        match event {
+            VimHistoryEvent::None => {}
+            VimHistoryEvent::InsertStarted => {
+                self.vim_composer_history.begin_insert(before);
+            }
+            VimHistoryEvent::InsertFinished { changed } => {
+                self.vim_composer_history.finish_insert(changed);
+            }
+            VimHistoryEvent::EditRecorded => self.vim_composer_history.record_edit(before),
+            VimHistoryEvent::Undo { steps } => {
+                let current = self.vim_composer_snapshot();
+                if let (Some(snapshot), _) = self.vim_composer_history.undo(current, steps) {
+                    self.restore_vim_composer_snapshot(snapshot);
+                }
+            }
+            VimHistoryEvent::Redo { steps } => {
+                let current = self.vim_composer_snapshot();
+                if let (Some(snapshot), _) = self.vim_composer_history.redo(current, steps) {
+                    self.restore_vim_composer_snapshot(snapshot);
+                }
+            }
+        }
+    }
+
+    fn restore_vim_composer_snapshot(&mut self, snapshot: VimComposerSnapshot) {
+        self.draft.is_bash_mode = snapshot.is_bash_mode;
+        self.draft.pending_pastes = snapshot.pending_pastes;
+        self.attachments = snapshot.attachments;
     }
 
     fn reconcile_deleted_elements(&mut self, elements_before: Vec<String>) {
@@ -6256,6 +6388,127 @@ mod tests {
             InputResult::Submitted { text, .. } => assert_eq!(text, "h"),
             _ => panic!("expected Submitted"),
         }
+    }
+
+    #[test]
+    fn vim_undoes_direct_paste_and_clears_redo_on_new_paste() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ true,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ true,
+        );
+        composer.set_vim_enabled(/*enabled*/ true);
+
+        composer.handle_paste("abc".to_string());
+        composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert_eq!(composer.current_text(), "");
+
+        composer.handle_paste("z".to_string());
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(composer.current_text(), "z");
+    }
+
+    #[test]
+    fn vim_undo_restores_large_paste_payload() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ true,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ true,
+        );
+        composer.set_vim_enabled(/*enabled*/ true);
+        let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+        composer.handle_paste(paste.clone());
+        composer.draft.textarea.set_cursor(/*pos*/ 0);
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(composer.draft.pending_pastes.is_empty());
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+
+        assert_eq!(composer.current_text_with_pending(), paste);
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(result, InputResult::Submitted { text, .. } if text == paste));
+    }
+
+    #[test]
+    fn vim_undo_restores_local_image_attachment() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ true,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ true,
+        );
+        composer.set_vim_enabled(/*enabled*/ true);
+        let path = PathBuf::from("/tmp/vim-undo-image.png");
+        composer.attach_image(path.clone());
+        composer.draft.textarea.set_cursor(/*pos*/ 0);
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(composer.local_image_paths().is_empty());
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+
+        assert_eq!(composer.local_image_paths(), vec![path]);
+        assert_eq!(
+            composer.draft.textarea.element_payloads(),
+            vec!["[Image #1]".to_string()]
+        );
+    }
+
+    #[test]
+    fn vim_undo_and_redo_restore_shell_mode() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ true,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ true,
+        );
+        composer.set_vim_enabled(/*enabled*/ true);
+
+        for ch in ['i', '!', 'e', 'c', 'h', 'o'] {
+            composer.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(composer.draft.is_bash_mode);
+        assert_eq!(composer.current_text(), "!echo");
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert!(!composer.draft.is_bash_mode);
+        assert_eq!(composer.current_text(), "");
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(composer.draft.is_bash_mode);
+        assert_eq!(composer.current_text(), "!echo");
     }
 
     #[test]
@@ -9758,6 +10011,33 @@ mod tests {
     }
 
     #[test]
+    fn vim_normal_ctrl_r_redoes_instead_of_opening_history_search() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ true,
+        );
+        composer.draft.textarea.set_text_clearing_elements("abc");
+        composer.draft.textarea.set_cursor(/*pos*/ 0);
+        composer.set_vim_enabled(/*enabled*/ true);
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert!(!composer.history_search_active());
+        assert_eq!(composer.draft.textarea.text(), "bc");
+    }
+
+    #[test]
     fn tab_queues_leading_space_slash_as_plain_text_while_task_running() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
@@ -12560,6 +12840,34 @@ mod tests {
             composer.attachments.local_images[0].placeholder,
             "[Image #1]"
         );
+    }
+
+    #[test]
+    fn vim_undo_and_redo_restore_deleted_remote_image() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ true,
+        );
+        composer.set_vim_enabled(/*enabled*/ true);
+        let remote_image_url = "https://example.com/one.png".to_string();
+        composer.set_remote_image_urls(vec![remote_image_url.clone()]);
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        composer.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(composer.remote_image_urls(), Vec::<String>::new());
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert_eq!(composer.remote_image_urls(), vec![remote_image_url]);
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(composer.remote_image_urls(), Vec::<String>::new());
     }
 
     #[test]

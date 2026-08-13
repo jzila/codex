@@ -23,7 +23,7 @@ pub(super) struct AttachedImage {
     pub(super) path: PathBuf,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct AttachmentState {
     pub(super) local_images: Vec<AttachedImage>,
     pub(super) remote_image_urls: Vec<String>,

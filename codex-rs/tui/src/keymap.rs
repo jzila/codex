@@ -185,6 +185,8 @@ pub(crate) struct VimNormalKeymap {
     pub(crate) change_to_line_end: Vec<KeyBinding>,
     pub(crate) yank_line: Vec<KeyBinding>,
     pub(crate) paste_after: Vec<KeyBinding>,
+    pub(crate) undo: Vec<KeyBinding>,
+    pub(crate) redo: Vec<KeyBinding>,
     pub(crate) start_delete_operator: Vec<KeyBinding>,
     pub(crate) start_yank_operator: Vec<KeyBinding>,
     pub(crate) start_change_operator: Vec<KeyBinding>,
@@ -667,6 +669,8 @@ impl RuntimeKeymap {
             change_to_line_end: resolve_local!(keymap, defaults, vim_normal, change_to_line_end),
             yank_line: resolve_local!(keymap, defaults, vim_normal, yank_line),
             paste_after: resolve_local!(keymap, defaults, vim_normal, paste_after),
+            undo: resolve_local!(keymap, defaults, vim_normal, undo),
+            redo: resolve_local!(keymap, defaults, vim_normal, redo),
             start_delete_operator: resolve_local!(
                 keymap,
                 defaults,
@@ -764,6 +768,8 @@ impl RuntimeKeymap {
                 keymap.vim_normal.paste_after.as_ref(),
                 vim_normal.paste_after.as_slice(),
             ),
+            (keymap.vim_normal.undo.as_ref(), vim_normal.undo.as_slice()),
+            (keymap.vim_normal.redo.as_ref(), vim_normal.redo.as_slice()),
             (
                 keymap.vim_normal.start_delete_operator.as_ref(),
                 vim_normal.start_delete_operator.as_slice(),
@@ -790,6 +796,16 @@ impl RuntimeKeymap {
         if keymap.vim_normal.substitute_char.is_none() {
             vim_normal
                 .substitute_char
+                .retain(|binding| !configured_vim_normal_bindings_to_preserve.contains(binding));
+        }
+        if keymap.vim_normal.undo.is_none() {
+            vim_normal
+                .undo
+                .retain(|binding| !configured_vim_normal_bindings_to_preserve.contains(binding));
+        }
+        if keymap.vim_normal.redo.is_none() {
+            vim_normal
+                .redo
                 .retain(|binding| !configured_vim_normal_bindings_to_preserve.contains(binding));
         }
 
@@ -891,7 +907,6 @@ impl RuntimeKeymap {
                 .select_around_text_object
                 .retain(|binding| !configured_vim_operator_bindings_to_preserve.contains(binding));
         }
-
         let vim_text_object = VimTextObjectKeymap {
             word: resolve_local!(keymap, defaults, vim_text_object, word),
             big_word: resolve_local!(keymap, defaults, vim_text_object, big_word),
@@ -1228,6 +1243,8 @@ impl RuntimeKeymap {
                 ],
                 yank_line: default_bindings![shift(KeyCode::Char('y')), plain(KeyCode::Char('Y'))],
                 paste_after: default_bindings![plain(KeyCode::Char('p'))],
+                undo: default_bindings![plain(KeyCode::Char('u'))],
+                redo: default_bindings![ctrl(KeyCode::Char('r'))],
                 start_delete_operator: default_bindings![plain(KeyCode::Char('d'))],
                 start_yank_operator: default_bindings![plain(KeyCode::Char('y'))],
                 start_change_operator: default_bindings![plain(KeyCode::Char('c'))],
@@ -1692,6 +1709,8 @@ impl RuntimeKeymap {
                 ),
                 ("yank_line", self.vim_normal.yank_line.as_slice()),
                 ("paste_after", self.vim_normal.paste_after.as_slice()),
+                ("undo", self.vim_normal.undo.as_slice()),
+                ("redo", self.vim_normal.redo.as_slice()),
                 (
                     "start_delete_operator",
                     self.vim_normal.start_delete_operator.as_slice(),
@@ -2667,6 +2686,27 @@ mod tests {
         keymap.vim_normal.substitute_char = Some(one("s"));
 
         expect_conflict(&keymap, "move_left", "substitute_char");
+    }
+
+    #[test]
+    fn configured_legacy_vim_normal_bindings_prune_new_history_defaults() {
+        let mut keymap = TuiKeymap::default();
+        keymap.vim_normal.move_left = Some(one("u"));
+        keymap.vim_normal.move_right = Some(one("ctrl-r"));
+
+        let runtime = RuntimeKeymap::from_config(&keymap).expect("config should parse");
+
+        assert_eq!(
+            (runtime.vim_normal.move_left, runtime.vim_normal.move_right),
+            (
+                vec![key_hint::plain(KeyCode::Char('u'))],
+                vec![key_hint::ctrl(KeyCode::Char('r'))]
+            )
+        );
+        assert_eq!(
+            (runtime.vim_normal.undo, runtime.vim_normal.redo),
+            (Vec::new(), Vec::new())
+        );
     }
 
     #[test]

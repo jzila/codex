@@ -3432,10 +3432,12 @@
               "open_line_above": null,
               "open_line_below": null,
               "paste_after": null,
+              "redo": null,
               "start_change_operator": null,
               "start_delete_operator": null,
               "start_yank_operator": null,
               "substitute_char": null,
+              "undo": null,
               "yank_line": null
             },
             "vim_operator": {
@@ -4141,10 +4143,12 @@
             "open_line_above": null,
             "open_line_below": null,
             "paste_after": null,
+            "redo": null,
             "start_change_operator": null,
             "start_delete_operator": null,
             "start_yank_operator": null,
             "substitute_char": null,
+            "undo": null,
             "yank_line": null
           }
         },
@@ -4548,6 +4552,14 @@
           ],
           "description": "Paste after cursor (`p`)."
         },
+        "redo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Redo the latest undone edit (`Ctrl+R`)."
+        },
         "start_change_operator": {
           "allOf": [
             {
@@ -4579,6 +4591,14 @@
             }
           ],
           "description": "Delete character under cursor and enter insert mode (`s`)."
+        },
+        "undo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Undo the latest edit (`u`)."
         },
         "yank_line": {
           "allOf": [

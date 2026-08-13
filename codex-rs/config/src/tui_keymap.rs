@@ -239,6 +239,10 @@ pub struct TuiVimNormalKeymap {
     pub yank_line: Option<KeybindingsSpec>,
     /// Paste after cursor (`p`).
     pub paste_after: Option<KeybindingsSpec>,
+    /// Undo the latest edit (`u`).
+    pub undo: Option<KeybindingsSpec>,
+    /// Redo the latest undone edit (`Ctrl+R`).
+    pub redo: Option<KeybindingsSpec>,
     /// Begin delete operator; next key selects motion (`d`).
     pub start_delete_operator: Option<KeybindingsSpec>,
     /// Begin yank operator; next key selects motion (`y`).
